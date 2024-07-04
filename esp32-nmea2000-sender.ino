@@ -85,7 +85,7 @@ int readIntFromStorage(const char* key, int defaultValue) {
   int value = preferences.getInt(key, defaultValue);
   preferences.end();
 #if ENABLE_DEBUG_LOG == 1
-  Serial.printf("Received %s from storage: %d", key, value);
+  Serial.printf("Received %s from storage: %d\n", key, value);
 #endif
   return value;
 }
@@ -95,7 +95,7 @@ void writeIntToStorage(const char* key, int value) {
   preferences.putInt(key, value);
   preferences.end();
 #if ENABLE_DEBUG_LOG == 1
-  Serial.printf("Written %s to storage: %d", key, value);
+  Serial.printf("Written %s to storage: %d\n", key, value);
 #endif
 }
 
@@ -146,7 +146,6 @@ void setup() {
   NMEA2000.SetForwardType(tNMEA2000::fwdt_Text); // Show in clear text. Leave uncommented for default Actisense format.
 
   NodeAddress = readIntFromStorage("LastNodeAddress", 33);  // Read stored last NodeAddress, default 33
-  debugInt("NodeAddress: %d", NodeAddress);
 
   NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, NodeAddress);
 
