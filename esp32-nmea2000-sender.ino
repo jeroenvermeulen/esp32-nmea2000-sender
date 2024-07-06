@@ -22,27 +22,36 @@
 // NMEA2000_mcp.h                    // https://github.com/ttlappalainen/NMEA2000_mcp
 
 #define ENABLE_DEBUG_LOG 1           // Debug log on serial
-#define NMEA_DEBUG_LOG 1             // NMEA message log on serial
+#define NMEA_DEBUG_LOG 0             // NMEA message log on serial
 #define ADC_Calibration_Value2 19.0  // The real value depends on the true resistor values for the ADC input (100K / 27 K).
 
 int NodeAddress;          // To store last Node Address
 Preferences preferences;  // Nonvolatile storage on ESP32 - To store LastDeviceAddress
 
 // Set the information for other bus devices, which messages we support
-const unsigned long TransmitMessages[] PROGMEM = { 130313L,  // Humidity
-                                                   130315L,  // Pressure
-                                                   130316L,  // Temperature extended range
-                                                   127508L,  // Battery Status
-                                                   127501L,  // Universal Binary Status Report
-                                                   0 };
+const unsigned long TransmitMessages[] PROGMEM = {  // 126993 // Heartbeat
+  // 126996
+  127501L,  // Universal Binary Status Report
+  127505L,  // Fluid Level
+  127508L,  // Battery Status
+  130310L,  // Environmental Parameters - deprecated
+  130313L,  // Humidity
+  130315L,  // Pressure
+  130316L,  // Temperature extended range
+  // 60928
+  0
+};
 
 // Create schedulers, disabled at the beginning
 //                                  enabled  period offset
 tN2kSyncScheduler DallasTemperatureScheduler(false, 1500, 500);
-tN2kSyncScheduler BmeClimateScheduler(false, 1500, 510);
-tN2kSyncScheduler BmeTemperatureScheduler(false, 1500, 520);
-tN2kSyncScheduler DCStatusScheduler(false, 1500, 540);
-tN2kSyncScheduler VaporAlarmScheduler(false, 1500, 550);
+tN2kSyncScheduler BmeTemperatureScheduler(false, 1500, 510);
+tN2kSyncScheduler BmeHumidityScheduler(false, 1500, 520);
+tN2kSyncScheduler BmePressureScheduler(false, 1500, 530);
+tN2kSyncScheduler EnvironmentScheduler(false, 1500, 540);
+tN2kSyncScheduler DCStatusScheduler(false, 1500, 550);
+tN2kSyncScheduler VaporAlarmScheduler(false, 1500, 560);
+tN2kSyncScheduler EngineDynamicScheduler(false, 1500, 570);
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_PIN);
@@ -52,8 +61,13 @@ DallasTemperature dallasSensor(&oneWire);
 BME280I2C bme;
 
 // Global Data
-float dallasTemp = 0.0;
-float BatteryVolt = 0.0;
+float dallasTemp = NAN;
+float busVoltage = NAN;
+float bmeTemperature = NAN;
+float bmeHumidity = NAN;
+float bmePressure = NAN;
+float vaporPercent = NAN;
+unsigned long uptimeSec = 0;
 
 // Task handle for OneWire read (Core 0 on ESP32)
 TaskHandle_t DallasTask;
@@ -82,10 +96,13 @@ void OnN2kOpen() {
   debugLog("NMEA2000 is Open.");
   // Start schedulers now.
   DallasTemperatureScheduler.UpdateNextTime();
-  BmeClimateScheduler.UpdateNextTime();
   BmeTemperatureScheduler.UpdateNextTime();
+  BmeHumidityScheduler.UpdateNextTime();
+  BmePressureScheduler.UpdateNextTime();
+  EnvironmentScheduler.UpdateNextTime();
   DCStatusScheduler.UpdateNextTime();
   VaporAlarmScheduler.UpdateNextTime();
+  EngineDynamicScheduler.UpdateNextTime();
 }
 
 int readIntFromStorage(const char* key, int defaultValue) {
@@ -189,7 +206,7 @@ void setup() {
 
   NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);  // Show in clear text. Leave uncommented for default Actisense format.
 
-  NodeAddress = readIntFromStorage("LastNodeAddress", 33);  // Read stored last NodeAddress, default 33
+  NodeAddress = readIntFromStorage("LastNodeAddress", 15);  // Read stored last NodeAddress
 
   NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, NodeAddress);
 
@@ -200,133 +217,16 @@ void setup() {
 
   // Create task for core 0, loop() runs on core 1
   xTaskCreatePinnedToCore(
-    GetTemperature, /* Function to implement the task */
-    "DallasTask",   /* Name of the task */
-    10000,          /* Stack size in words */
-    NULL,           /* Task input parameter */
-    0,              /* Priority of the task */
-    &DallasTask,    /* Task handle. */
-    0);             /* Core where the task should run */
+    ReadSensors,  /* Function to implement the task */
+    "DallasTask", /* Name of the task */
+    10000,        /* Stack size in words */
+    NULL,         /* Task input parameter */
+    0,            /* Priority of the task */
+    &DallasTask,  /* Task handle. */
+    0);           /* Core where the task should run */
 
   debugLog("Setup complete.");
   delay(200);
-}
-
-// This task runs isolated on core 0 because dallasSensor.requestTemperatures() is slow and blocking for about 750 ms
-void GetTemperature(void* parameter) {
-  float tmp = 0;
-  for (;;) {
-    dallasSensor.requestTemperatures();  // Send the command to get temperatures
-    vTaskDelay(100);
-    tmp = dallasSensor.getTempCByIndex(0);
-    if (tmp != -127) dallasTemp = tmp;
-    vTaskDelay(100);
-  }
-}
-
-void SendN2kBattery(double BatteryVoltage) {
-  if (DCStatusScheduler.IsTime()) {
-    tN2kMsg N2kMsg;
-    DCStatusScheduler.UpdateNextTime();
-    if (0 >= BatteryVoltage) {
-      debugDouble("ERROR Invalid voltage reading: %.02f", BatteryVoltage);
-      BatteryVoltage = N2kDoubleNA;
-    } else {
-      debugDouble("Volt:         %4.02f V", BatteryVoltage);
-    }
-    SetN2kDCBatStatus(N2kMsg, 1, BatteryVoltage, N2kDoubleNA, N2kDoubleNA, 1);
-    NMEA2000.SendMsg(N2kMsg);
-  }
-}
-
-void SendN2kDallasTemperature() {
-  if (DallasTemperatureScheduler.IsTime()) {
-    DallasTemperatureScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
-
-    int instance = 0;
-    debugDouble("Dallas Temp:  %4.02f °C", dallasTemp);
-    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_SeaTemperature, CToKelvin(dallasTemp));  // PGN 130316
-
-    NMEA2000.SendMsg(N2kMsg);
-  }
-}
-
-void SendN2kBmeClimate() {
-  if (BmeClimateScheduler.IsTime()) {
-    BmeClimateScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
-
-    float bmeTemp(NAN), bmeHum(NAN), bmePres(NAN);
-    bme.read(bmePres, bmeTemp, bmeHum);
-
-    int instance = 0;
-    //debugDouble("BME Temp:     %4.02f °C", bmeTemp);
-    //SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(bmeTemp)); // PGN 130316
-
-    debugDouble("BME Humidity: %4.02f %% RH", bmeHum);
-    SetN2kHumidity(N2kMsg, 0xff, instance, N2khs_InsideHumidity, bmeHum); // PGN 130313
-
-    // SignalK can't handle this somehow
-    // debugDouble("BME Pressure: %4.02f hPa", bmePres);
-    // SetN2kSetPressure(N2kMsg, 0xff, instance, N2kps_Atmospheric, hPAToPascal(bmePres)); // PGN 130315
-
-    NMEA2000.SendMsg(N2kMsg);
-  }
-}
-
-void SendN2kBmeTemperature() {
-  if (BmeTemperatureScheduler.IsTime()) {
-    BmeTemperatureScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
-
-    float bmeTemp(NAN), bmeHum(NAN), bmePres(NAN);
-    bme.read(bmePres, bmeTemp, bmeHum);
-
-    int instance = 0;
-    debugDouble("BME Temp:     %4.02f °C", bmeTemp);
-    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(bmeTemp)); // PGN 130316
-
-    //debugDouble("BME Humidity: %4.02f %% RH", bmeHum);
-    //SetN2kHumidity(N2kMsg, 0xff, instance, N2khs_InsideHumidity, bmeHum); // PGN 130313
-
-    // SignalK can't handle this somehow
-    // debugDouble("BME Pressure: %4.02f hPa", bmePres);
-    // SetN2kSetPressure(N2kMsg, 0xff, instance, N2kps_Atmospheric, hPAToPascal(bmePres)); // PGN 130315
-
-    NMEA2000.SendMsg(N2kMsg);
-  }
-}
-
-void SendN2kVaporAlarm() {
-  if (VaporAlarmScheduler.IsTime()) {
-    VaporAlarmScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
-    tN2kOnOff vaporStatus;
-
-    double reading = analogRead(VAPOR_PIN);  // Reference voltage is 3v3 so maximum reading is 3v3 = 4095 in range 0 to 4095
-    if (reading < 0 || reading > 4095) {
-      debugDouble("ERROR Invalid reading from Vapor: %.06f", reading);
-      vaporStatus = N2kOnOff_Unavailable;
-    } else {
-      double vaporPercent = reading * 100 / 4096;
-      debugDouble("Vapor         %4.02f %%", vaporPercent);
-      double uptimeSec = esp_timer_get_time() / 1000 / 1000;
-      if (uptimeSec < 3) {  // TODO 300
-        debugDouble("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
-        vaporStatus = N2kOnOff_Unavailable;
-      } else {
-        if (vaporPercent > 1) {
-          debugLog("Vapor ALARM");
-          vaporStatus = N2kOnOff_On;
-        } else {
-          vaporStatus = N2kOnOff_Off;
-        }
-      }
-    }
-    SetN2kBinaryStatus(N2kMsg, 33, vaporStatus);
-    NMEA2000.SendMsg(N2kMsg);
-  }
 }
 
 // ReadVoltage is used to improve the linearity of the ESP32 ADC see: https://github.com/G6EJD/ESP32-ADC-Accuracy-Improvement-function
@@ -337,26 +237,178 @@ double ReadVoltage() {
   }
   // Polynomial https://github.com/G6EJD/ESP32-ADC-Accuracy-Improvement-function/blob/master/ESP32_ADC_Read_Voltage_Accurate.ino
   reading = (-0.000000000000016 * pow(reading, 4) + 0.000000000118171 * pow(reading, 3) - 0.000000301211691 * pow(reading, 2) + 0.001109019271794 * reading + 0.034143524634089) * 1000;
-  return reading;
+  return reading * ADC_Calibration_Value2 / 4096;
+}
+
+// This task runs isolated on core 0 because dallasSensor.requestTemperatures() is slow and blocking for about 750 ms
+void ReadSensors(void* parameter) {
+  float dallasReceived = 0;
+  for (;;) {
+    // Dallas Temperature
+    dallasSensor.requestTemperatures();  // Send the command to get temperatures
+    vTaskDelay(100);
+    dallasReceived = dallasSensor.getTempCByIndex(0);
+    if (dallasReceived == -127) {
+      dallasTemp = NAN;
+    } else {
+      dallasTemp = dallasReceived;
+    }
+    vTaskDelay(100);
+
+    // BME 280
+    bme.read(bmePressure, bmeTemperature, bmeHumidity);
+
+    // Voltage
+    double voltageReading = ReadVoltage();
+    if (isnan(voltageReading) || 0 >= voltageReading || 100 < voltageReading) {
+      debugDouble("ERROR Invalid voltage reading: %.02f", voltageReading);
+      busVoltage = NAN;
+    } else {
+      if (isnan(busVoltage)) {
+        busVoltage = voltageReading;
+      } else {
+        // Filter to eliminate spike for ADC readings
+        busVoltage = ((busVoltage * 15) + voltageReading) / 16;
+      }
+    }
+
+    // Vapor Sensor
+    uptimeSec = esp_timer_get_time() / 1000 / 1000;
+    if (uptimeSec < 300) {
+      debugDouble("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
+    } else {
+      double vaporReading = analogRead(VAPOR_PIN);
+      if (vaporReading >= 0 || vaporReading < 4096) {
+        vaporPercent = vaporReading * 100 / 4096;
+      } else {
+        debugDouble("ERROR Invalid reading from Vapor: %.06f", vaporReading);
+        vaporPercent = NAN;
+      }
+    }
+  }
+}
+
+void SendN2kBattery() {
+  if (DCStatusScheduler.IsTime()) {
+    tN2kMsg N2kMsg;
+    DCStatusScheduler.UpdateNextTime();
+    double voltageSend = N2kDoubleNA;
+    if (!isnan(busVoltage)) {
+      voltageSend = busVoltage;
+    }
+    debugDouble("Volt:         %4.02f V", busVoltage);
+    SetN2kDCBatStatus(N2kMsg, 1, voltageSend, N2kDoubleNA, N2kDoubleNA, 1);
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
+void SendN2kDallasTemperature() {
+  if (DallasTemperatureScheduler.IsTime()) {
+    DallasTemperatureScheduler.UpdateNextTime();
+    tN2kMsg N2kMsg;
+    int instance = 1;
+    double dallasSend = N2kDoubleNA;
+    if (!isnan(dallasTemp)) {
+      dallasSend = CToKelvin(dallasTemp);
+    }
+    debugDouble("Dallas Temp:  %4.02f °C", dallasTemp);
+    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_LiveWellTemperature, dallasSend);  // PGN 130316
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
+void SendN2kBmeHumidity() {
+  if (BmeHumidityScheduler.IsTime()) {
+    BmeHumidityScheduler.UpdateNextTime();
+    tN2kMsg N2kMsg;
+    int instance = 2;
+    debugDouble("BME Humidity: %4.02f %% RH", bmeHumidity);
+    SetN2kHumidity(N2kMsg, 0xff, instance, N2khs_InsideHumidity, bmeHumidity);  // PGN 130313
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
+void SendN2kBmeTemperature() {
+  if (BmeTemperatureScheduler.IsTime()) {
+    BmeTemperatureScheduler.UpdateNextTime();
+    tN2kMsg N2kMsg;
+    int instance = 2;
+    debugDouble("BME Temp:     %4.02f °C", bmeTemperature);
+    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(bmeTemperature));  // PGN 130316
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
+void SendN2kBmePressure() {
+  if (BmePressureScheduler.IsTime()) {
+    BmePressureScheduler.UpdateNextTime();
+    tN2kMsg N2kMsg;
+    int instance = 2;
+    debugDouble("BME Pressure: %4.02f hPa", bmePressure);
+    SetN2kSetPressure(N2kMsg, 0xff, instance, N2kps_Atmospheric, hPAToPascal(bmePressure));  // PGN 130315
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
+void SendN2kEnvironment() {
+  if (EnvironmentScheduler.IsTime()) {
+    EnvironmentScheduler.UpdateNextTime();
+    tN2kMsg N2kMsg;
+    SetN2kOutsideEnvironmentalParameters(N2kMsg, 0xff, N2kDoubleNA, N2kDoubleNA, hPAToPascal(bmePressure));  // PGN 130310
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
+void SendN2kVaporAlarm() {
+  if (VaporAlarmScheduler.IsTime()) {
+    VaporAlarmScheduler.UpdateNextTime();
+    tN2kMsg N2kMsg;
+    tN2kOnOff vaporStatus = N2kOnOff_Unavailable;
+    if (!isnan(vaporPercent)) {
+      if (vaporPercent > 10) {
+        debugLog("Vapor ALARM");
+        vaporStatus = N2kOnOff_On;
+      } else {
+        vaporStatus = N2kOnOff_Off;
+      }
+    }
+    debugDouble("Vapor         %4.02f %%", vaporPercent);
+    SetN2kBinaryStatus(N2kMsg, 15, vaporStatus);
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
+void SendN2kEngineDynamicParam() {
+  if (EngineDynamicScheduler.IsTime()) {
+    EngineDynamicScheduler.UpdateNextTime();
+    tN2kMsg N2kMsg;
+    double fluidSend = N2kDoubleNA;
+    if (!isnan(vaporPercent)) {
+      fluidSend = vaporPercent;
+    }
+    SetN2kFluidLevel(N2kMsg, 0, N2kft_FuelGasoline, fluidSend, N2kDoubleNA);
+    NMEA2000.SendMsg(N2kMsg);
+  }
 }
 
 void loop() {
-  // Filter to eliminate spike for ADC readings
-  BatteryVolt = ((BatteryVolt * 15) + (ReadVoltage() * ADC_Calibration_Value2 / 4096)) / 16;
-
   SendN2kDallasTemperature();
-  SendN2kBmeClimate();
   SendN2kBmeTemperature();
-  SendN2kBattery(BatteryVolt);
+  SendN2kBmeHumidity();
+  SendN2kBmePressure();
+  SendN2kEnvironment();
+  SendN2kBattery();
   SendN2kVaporAlarm();
+  SendN2kEngineDynamicParam();
   NMEA2000.ParseMessages();
 
-  // int SourceAddress = NMEA2000.GetN2kSource();
-  // if (SourceAddress != NodeAddress) { // Save potentially changed Source Address to NVS memory
-  //   NodeAddress = SourceAddress;      // Set new Node Address (to save only once)
-  //   writeIntToStorage("LastNodeAddress", SourceAddress);
-  //   debugInt("Address Change: New Address=%d\n", NodeAddress);
-  // }
+  int SourceAddress = NMEA2000.GetN2kSource();
+  if (SourceAddress != NodeAddress) {  // Save potentially changed Source Address to NVS memory
+    debugInt("Address Change: Old Address=%d", NodeAddress);
+    debugInt("                New Address=%d", SourceAddress);
+    NodeAddress = SourceAddress;  // Set new Node Address (to save only once)
+    writeIntToStorage("LastNodeAddress", NodeAddress);
+  }
 
   // Dummy to empty input buffer to avoid board to stuck with e.g. NMEA Reader
   if (Serial.available()) {
