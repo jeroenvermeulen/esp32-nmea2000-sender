@@ -15,8 +15,9 @@
 #include <esp_mac.h>            // ESP32
 #include <NMEA2000_CAN.h>       // https://github.com/ttlappalainen/NMEA2000
 #include <N2kMessages.h>        // https://github.com/ttlappalainen/NMEA2000
-#include <DallasTemperature.h>  // Library: DallasTemperature by milesburton  https://github.com/milesburton/Arduino-Temperature-Control-Library
-#include <BME280I2C.h>          // Library: BME280 by Tyler Glenn https://github.com/finitespace/BME280/
+#include <DallasTemperature.h>  // Library Man: DallasTemperature by milesburton  https://github.com/milesburton/Arduino-Temperature-Control-Library
+// #include <BME280I2C.h>          // Library Man: BME280 by Tyler Glenn https://github.com/finitespace/BME280/
+#include "Zanshin_BME680.h"     // Library Man: BME680 by SV Zanshin / Zanduino
 //// also needed:
 // mcp_can.h                         // https://github.com/ttlappalainen/CAN_BUS_Shield
 // NMEA2000_mcp.h                    // https://github.com/ttlappalainen/NMEA2000_mcp
@@ -58,7 +59,8 @@ OneWire oneWire(ONE_WIRE_PIN);
 // Pass our oneWire reference to Dallas Temperature.
 DallasTemperature dallasSensor(&oneWire);
 // BME280
-BME280I2C bme;
+// BME280I2C bme;
+BME680_Class BME680; 
 
 // Global Data
 float dallasTemp = NAN;
@@ -66,6 +68,7 @@ float busVoltage = NAN;
 float bmeTemperature = NAN;
 float bmeHumidity = NAN;
 float bmePressure = NAN;
+float bmeGas = NAN;
 float vaporPercent = NAN;
 unsigned long uptimeSec = 0;
 
@@ -177,9 +180,20 @@ void setup() {
   dallasSensor.begin();
 
   Wire.begin();
-  if (!bme.begin()) {
-    Serial.println("Could not find a valid BME280 sensor, check wiring!");
-  }
+  // if (!bme.begin()) {
+  //   Serial.println("Could not find a valid BME280 sensor, check wiring!");
+  // }
+  while (!BME680.begin(I2C_STANDARD_MODE)) {  // Start BME680 using I2C, use first device found
+    debugLog("-  Unable to find BME680. Trying again in 5 seconds.");
+    delay(5000);
+  }  // of loop until device is located
+  BME680.setOversampling(TemperatureSensor, Oversample16);  // Use enumerated type values
+  BME680.setOversampling(HumiditySensor, Oversample16);     // Use enumerated type values
+  BME680.setOversampling(PressureSensor, Oversample16);     // Use enumerated type values
+  Serial.print(F("- Setting IIR filter to a value of 4 samples\n"));
+  BME680.setIIRFilter(IIR4);  // Use enumerated type values
+  Serial.print(F("- Setting gas measurement to 320\xC2\xB0\x43 for 150ms\n"));  // "�C" symbols
+  BME680.setGas(320, 150);  // 320�c for 150 milliseconds
 
   // // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
   NMEA2000.SetN2kCANMsgBufSize(8);
@@ -256,7 +270,12 @@ void ReadSensors(void* parameter) {
     vTaskDelay(100);
 
     // BME 280
-    bme.read(bmePressure, bmeTemperature, bmeHumidity);
+    // bme.read(bmePressure, bmeTemperature, bmeHumidity);
+    static int32_t  temp, humidity, pressure, gas;
+    BME680.getSensorData(temp, humidity, pressure, gas);
+    bmeTemperature = temp / 100;
+    bmeHumidity = humidity / 1000;
+    bmePressure = pressure / 100;
 
     // Voltage
     double voltageReading = ReadVoltage();
