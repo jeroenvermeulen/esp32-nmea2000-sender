@@ -4,20 +4,18 @@
 
 #define ESP32_CAN_TX_PIN GPIO_NUM_5  // Set CAN TX port to 5
 #define ESP32_CAN_RX_PIN GPIO_NUM_4  // Set CAN RX port to 4
-#define ONE_WIRE_PIN GPIO_NUM_13     // Data wire for teperature (Dallas DS18B20)
 #define VOLTAGE_PIN GPIO_NUM_35      // Voltage measure is connected GPIO 35 (Analog ADC1_CH7)
 #define VAPOR_PIN GPIO_NUM_34        // Voltage measure is connected GPIO 34 (Analog ADC1_CH6)
 
 #include <Arduino.h>
-#include <Preferences.h>        // ESP32
-#include <WiFi.h>               // ESP32
-#include <Wire.h>               // ESP32
-#include <esp_mac.h>            // ESP32
-#include <NMEA2000_CAN.h>       // https://github.com/ttlappalainen/NMEA2000
-#include <N2kMessages.h>        // https://github.com/ttlappalainen/NMEA2000
-#include <DallasTemperature.h>  // Library Man: DallasTemperature by milesburton  https://github.com/milesburton/Arduino-Temperature-Control-Library
-// #include <BME280I2C.h>          // Library Man: BME280 by Tyler Glenn https://github.com/finitespace/BME280/
-#include "Zanshin_BME680.h"     // Library Man: BME680 by SV Zanshin / Zanduino
+#include <Preferences.h>      // ESP32
+#include <WiFi.h>             // ESP32
+#include <Wire.h>             // ESP32
+#include <esp_mac.h>          // ESP32
+#include <NMEA2000_CAN.h>     // https://github.com/ttlappalainen/NMEA2000
+#include <N2kMessages.h>      // https://github.com/ttlappalainen/NMEA2000
+#include "Adafruit_SHT4x.h"   // Library Man: Adafruit SHT4x by Adafruit
+#include <Adafruit_BNO055.h>  // Library Man: Adafruit BNO055 by Adafruit
 //// also needed:
 // mcp_can.h                         // https://github.com/ttlappalainen/CAN_BUS_Shield
 // NMEA2000_mcp.h                    // https://github.com/ttlappalainen/NMEA2000_mcp
@@ -45,7 +43,6 @@ const unsigned long TransmitMessages[] PROGMEM = {  // 126993 // Heartbeat
 
 // Create schedulers, disabled at the beginning
 //                                  enabled  period offset
-tN2kSyncScheduler DallasTemperatureScheduler(false, 1500, 500);
 tN2kSyncScheduler BmeTemperatureScheduler(false, 1500, 510);
 tN2kSyncScheduler BmeHumidityScheduler(false, 1500, 520);
 tN2kSyncScheduler BmePressureScheduler(false, 1500, 530);
@@ -54,16 +51,15 @@ tN2kSyncScheduler DCStatusScheduler(false, 1500, 550);
 tN2kSyncScheduler VaporAlarmScheduler(false, 1500, 560);
 tN2kSyncScheduler EngineDynamicScheduler(false, 1500, 570);
 
-// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
-OneWire oneWire(ONE_WIRE_PIN);
-// Pass our oneWire reference to Dallas Temperature.
-DallasTemperature dallasSensor(&oneWire);
-// BME280
-// BME280I2C bme;
-BME680_Class BME680; 
+// SHT40
+Adafruit_SHT4x sht4 = Adafruit_SHT4x();
+
+// BNO055
+#define BNO055_SAMPLERATE_DELAY_MS (100)
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29);
+
 
 // Global Data
-float dallasTemp = NAN;
 float busVoltage = NAN;
 float bmeTemperature = NAN;
 float bmeHumidity = NAN;
@@ -73,7 +69,7 @@ float vaporPercent = NAN;
 unsigned long uptimeSec = 0;
 
 // Task handle for OneWire read (Core 0 on ESP32)
-TaskHandle_t DallasTask;
+TaskHandle_t readSensorsTask;
 
 void debugLog(char* str) {
 #if ENABLE_DEBUG_LOG == 1
@@ -98,7 +94,6 @@ void debugDouble(char* str, double value) {
 void OnN2kOpen() {
   debugLog("NMEA2000 is Open.");
   // Start schedulers now.
-  DallasTemperatureScheduler.UpdateNextTime();
   BmeTemperatureScheduler.UpdateNextTime();
   BmeHumidityScheduler.UpdateNextTime();
   BmePressureScheduler.UpdateNextTime();
@@ -166,6 +161,68 @@ void i2cScan() {
   }
 }
 
+void setupSHT40() {
+  Serial.println("Adafruit SHT4x test");
+  if (!sht4.begin()) {
+    Serial.println("Couldn't find SHT4x");
+    while (1) delay(1);
+  }
+  Serial.println("Found SHT4x sensor");
+  Serial.print("Serial number 0x");
+  Serial.println(sht4.readSerial(), HEX);
+
+  // You can have 3 different precisions, higher precision takes longer
+  sht4.setPrecision(SHT4X_HIGH_PRECISION);
+  switch (sht4.getPrecision()) {
+    case SHT4X_HIGH_PRECISION:
+      Serial.println("High precision");
+      break;
+    case SHT4X_MED_PRECISION:
+      Serial.println("Med precision");
+      break;
+    case SHT4X_LOW_PRECISION:
+      Serial.println("Low precision");
+      break;
+  }
+  // You can have 6 different heater settings
+  // higher heat and longer times uses more power
+  // and reads will take longer too!
+  sht4.setHeater(SHT4X_LOW_HEATER_100MS);
+  switch (sht4.getHeater()) {
+    case SHT4X_NO_HEATER:
+      Serial.println("No heater");
+      break;
+    case SHT4X_HIGH_HEATER_1S:
+      Serial.println("High heat for 1 second");
+      break;
+    case SHT4X_HIGH_HEATER_100MS:
+      Serial.println("High heat for 0.1 second");
+      break;
+    case SHT4X_MED_HEATER_1S:
+      Serial.println("Medium heat for 1 second");
+      break;
+    case SHT4X_MED_HEATER_100MS:
+      Serial.println("Medium heat for 0.1 second");
+      break;
+    case SHT4X_LOW_HEATER_1S:
+      Serial.println("Low heat for 1 second");
+      break;
+    case SHT4X_LOW_HEATER_100MS:
+      Serial.println("Low heat for 0.1 second");
+      break;
+  }
+}
+
+void setupBNO055() {
+  /* Initialize the sensor */
+  if (!bno.begin()) {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    while (1)
+      ;
+  }
+}
+
 void setup() {
   // Init USB serial port
   Serial.begin(115200);
@@ -176,24 +233,23 @@ void setup() {
   WiFi.disconnect();
   WiFi.mode(WIFI_OFF);
 
-  // Start OneWire
-  dallasSensor.begin();
-
   Wire.begin();
-  // if (!bme.begin()) {
-  //   Serial.println("Could not find a valid BME280 sensor, check wiring!");
-  // }
-  while (!BME680.begin(I2C_STANDARD_MODE)) {  // Start BME680 using I2C, use first device found
-    debugLog("-  Unable to find BME680. Trying again in 5 seconds.");
-    delay(5000);
-  }  // of loop until device is located
-  BME680.setOversampling(TemperatureSensor, Oversample16);  // Use enumerated type values
-  BME680.setOversampling(HumiditySensor, Oversample16);     // Use enumerated type values
-  BME680.setOversampling(PressureSensor, Oversample16);     // Use enumerated type values
-  Serial.print(F("- Setting IIR filter to a value of 4 samples\n"));
-  BME680.setIIRFilter(IIR4);  // Use enumerated type values
-  Serial.print(F("- Setting gas measurement to 320\xC2\xB0\x43 for 150ms\n"));  // "�C" symbols
-  BME680.setGas(320, 150);  // 320�c for 150 milliseconds
+  i2cScan();
+
+  // while (!BME680.begin(I2C_STANDARD_MODE)) {  // Start BME680 using I2C, use first device found
+  //   debugLog("-  Unable to find BME680. Trying again in 5 seconds.");
+  //   delay(5000);
+  // }  // of loop until device is located
+  // BME680.setOversampling(TemperatureSensor, Oversample16);  // Use enumerated type values
+  // BME680.setOversampling(HumiditySensor, Oversample16);     // Use enumerated type values
+  // BME680.setOversampling(PressureSensor, Oversample16);     // Use enumerated type values
+  // Serial.print(F("- Setting IIR filter to a value of 4 samples\n"));
+  // BME680.setIIRFilter(IIR4);  // Use enumerated type values
+  // Serial.print(F("- Setting gas measurement to 320\xC2\xB0\x43 for 150ms\n"));  // "�C" symbols
+  // BME680.setGas(320, 150);  // 320�c for 150 milliseconds
+
+  setupSHT40();
+  setupBNO055();
 
   // // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
   NMEA2000.SetN2kCANMsgBufSize(8);
@@ -231,13 +287,13 @@ void setup() {
 
   // Create task for core 0, loop() runs on core 1
   xTaskCreatePinnedToCore(
-    ReadSensors,  /* Function to implement the task */
-    "DallasTask", /* Name of the task */
-    10000,        /* Stack size in words */
-    NULL,         /* Task input parameter */
-    0,            /* Priority of the task */
-    &DallasTask,  /* Task handle. */
-    0);           /* Core where the task should run */
+    ReadSensors,       /* Function to implement the task */
+    "readSensorsTask", /* Name of the task */
+    10000,             /* Stack size in words */
+    NULL,              /* Task input parameter */
+    0,                 /* Priority of the task */
+    &readSensorsTask,  /* Task handle. */
+    0);                /* Core where the task should run */
 
   debugLog("Setup complete.");
   delay(200);
@@ -254,28 +310,37 @@ double ReadVoltage() {
   return reading * ADC_Calibration_Value2 / 4096;
 }
 
-// This task runs isolated on core 0 because dallasSensor.requestTemperatures() is slow and blocking for about 750 ms
 void ReadSensors(void* parameter) {
-  float dallasReceived = 0;
   for (;;) {
-    // Dallas Temperature
-    dallasSensor.requestTemperatures();  // Send the command to get temperatures
-    vTaskDelay(100);
-    dallasReceived = dallasSensor.getTempCByIndex(0);
-    if (dallasReceived == -127) {
-      dallasTemp = NAN;
-    } else {
-      dallasTemp = dallasReceived;
-    }
     vTaskDelay(100);
 
-    // BME 280
-    // bme.read(bmePressure, bmeTemperature, bmeHumidity);
-    static int32_t  temp, humidity, pressure, gas;
-    BME680.getSensorData(temp, humidity, pressure, gas);
-    bmeTemperature = temp / 100;
-    bmeHumidity = humidity / 1000;
-    bmePressure = pressure / 100;
+    sensors_event_t humidity, temp;
+
+    uint32_t timestamp = millis();
+    sht4.getEvent(&humidity, &temp);  // populate temp and humidity objects with fresh data
+    timestamp = millis() - timestamp;
+    Serial.print("Temperature: ");
+    Serial.print(temp.temperature);
+    Serial.println(" degrees C");
+    Serial.print("Humidity: ");
+    Serial.print(humidity.relative_humidity);
+    Serial.println("% rH");
+
+    Serial.print("Read duration (ms): ");
+    Serial.println(timestamp);
+
+
+    sensors_event_t event;
+    bno.getEvent(&event);
+    /* Display the floating point data */
+    Serial.print("Yaw: ");
+    Serial.print(event.orientation.x, 4);
+    Serial.print("\tPitch: ");
+    Serial.print(event.orientation.y, 4);
+    Serial.print("\tRoll: ");
+    Serial.print(event.orientation.z, 4);
+    Serial.println("");
+
 
     // Voltage
     double voltageReading = ReadVoltage();
@@ -317,21 +382,6 @@ void SendN2kBattery() {
     }
     debugDouble("Volt:         %4.02f V", busVoltage);
     SetN2kDCBatStatus(N2kMsg, 1, voltageSend, N2kDoubleNA, N2kDoubleNA, 1);
-    NMEA2000.SendMsg(N2kMsg);
-  }
-}
-
-void SendN2kDallasTemperature() {
-  if (DallasTemperatureScheduler.IsTime()) {
-    DallasTemperatureScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
-    int instance = 1;
-    double dallasSend = N2kDoubleNA;
-    if (!isnan(dallasTemp)) {
-      dallasSend = CToKelvin(dallasTemp);
-    }
-    debugDouble("Dallas Temp:  %4.02f °C", dallasTemp);
-    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_LiveWellTemperature, dallasSend);  // PGN 130316
     NMEA2000.SendMsg(N2kMsg);
   }
 }
@@ -411,7 +461,6 @@ void SendN2kEngineDynamicParam() {
 }
 
 void loop() {
-  SendN2kDallasTemperature();
   SendN2kBmeTemperature();
   SendN2kBmeHumidity();
   SendN2kBmePressure();
