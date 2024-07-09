@@ -14,18 +14,16 @@
 #include <esp_mac.h>          // ESP32
 #include <NMEA2000_CAN.h>     // https://github.com/ttlappalainen/NMEA2000
 #include <N2kMessages.h>      // https://github.com/ttlappalainen/NMEA2000
-#include "Adafruit_SHT4x.h"   // Library Man: Adafruit SHT4x by Adafruit
+#include <Adafruit_SHT4x.h>   // Library Man: Adafruit SHT4x by Adafruit
 #include <Adafruit_BNO055.h>  // Library Man: Adafruit BNO055 by Adafruit
-//// also needed:
-// mcp_can.h                         // https://github.com/ttlappalainen/CAN_BUS_Shield
-// NMEA2000_mcp.h                    // https://github.com/ttlappalainen/NMEA2000_mcp
+#include <mcp_can.h>          // https://github.com/ttlappalainen/CAN_BUS_Shield
+#include <NMEA2000_mcp.h>     // https://github.com/ttlappalainen/NMEA2000_mcp
 
 #define ENABLE_DEBUG_LOG 1           // Debug log on serial
 #define NMEA_DEBUG_LOG 0             // NMEA message log on serial
 #define ADC_Calibration_Value2 19.0  // The real value depends on the true resistor values for the ADC input (100K / 27 K).
 
-int NodeAddress;          // To store last Node Address
-Preferences preferences;  // Nonvolatile storage on ESP32 - To store LastDeviceAddress
+// Global Data
 
 // Set the information for other bus devices, which messages we support
 const unsigned long TransmitMessages[] PROGMEM = {  // 126993 // Heartbeat
@@ -56,13 +54,12 @@ Adafruit_SHT4x sht4 = Adafruit_SHT4x();
 #define BNO055_SAMPLERATE_DELAY_MS (100)
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29);
 
-
-// Global Data
-float gBusVoltage = NAN;
-float gTemperature = NAN;
+Preferences preferences;  // Nonvolatile storage on ESP32 - To store LastDeviceAddress
+int gNodeAddress;         // To store last Node Address
 float gHumidity = NAN;
 float gVaporPercent = NAN;
-unsigned long uptimeSec = 0;
+
+// /Global Data
 
 // No value passed, just a message
 void debugLog(const char* str) {
@@ -173,7 +170,7 @@ void setupSHT40() {
 
 void setupBNO055() {
   while (!bno.begin()) {
-    Serial.print("Couldn't find BNO055  - waiting 5 sec");
+    debugLog("Couldn't find BNO055  - waiting 5 sec");
     delay(5);
   }
   debugLog("Found BNO055 sensor");
@@ -201,16 +198,18 @@ void setupN2K() {
 #if NMEA_DEBUG_LOG == 1
   NMEA2000.SetForwardStream(&Serial);
 #endif
-  NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);            // Show in clear text. Leave uncommented for default Actisense format.
-  NodeAddress = readIntFromStorage("LastNodeAddress", 15);  // Read stored last NodeAddress
-  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, NodeAddress);
+  NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);             // Show in clear text. Leave uncommented for default Actisense format.
+  gNodeAddress = readIntFromStorage("LastNodeAddress", 15);  // Read stored last gNodeAddress
+  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, gNodeAddress);
   NMEA2000.ExtendTransmitMessages(TransmitMessages);
   NMEA2000.SetOnOpen(OnN2kOpen);
   NMEA2000.Open();
 }
 
 void setup() {
-  Serial.begin(115200);
+  if (ENABLE_DEBUG_LOG || NMEA_DEBUG_LOG) {
+    Serial.begin(115200);
+  }
   debugLog("");
   debugLog("Starting setup...");
 
@@ -219,7 +218,7 @@ void setup() {
   WiFi.mode(WIFI_OFF);
 
   Wire.begin();
-  i2cScan();
+  //i2cScan();
 
   setupSHT40();
   setupBNO055();
@@ -244,19 +243,19 @@ void SendN2kBattery() {
   if (DCStatusScheduler.IsTime()) {
     DCStatusScheduler.UpdateNextTime();
     double voltageReading = ReadVoltage();
+    float busVoltage = NAN;
     if (isnan(voltageReading) || 0 >= voltageReading || 100 < voltageReading) {
       debugLog("ERROR Invalid voltage reading: %.02f", voltageReading);
-      gBusVoltage = NAN;
     } else {
-      if (isnan(gBusVoltage)) {
-        gBusVoltage = voltageReading;
+      if (isnan(busVoltage)) {
+        busVoltage = voltageReading;
       } else {
         // Filter to eliminate spike for ADC readings
-        gBusVoltage = ((gBusVoltage * 15) + voltageReading) / 16;
+        busVoltage = ((busVoltage * 15) + voltageReading) / 16;
       }
     }
-    double voltageSend = (isnan(gBusVoltage)) ? N2kDoubleNA : gBusVoltage;
-    debugLog("Volt:         %6.02f V", gBusVoltage);
+    double voltageSend = (isnan(busVoltage)) ? N2kDoubleNA : busVoltage;
+    debugLog("Volt:          %6.02f V", busVoltage);
     tN2kMsg N2kMsg;
     SetN2kDCBatStatus(N2kMsg, 1, voltageSend, N2kDoubleNA, N2kDoubleNA, 1);
     NMEA2000.SendMsg(N2kMsg);
@@ -269,12 +268,12 @@ void SendN2kgTemperature() {
     // SHT40
     sensors_event_t humidity, temp;
     sht4.getEvent(&humidity, &temp);
-    gTemperature = temp.temperature;
+    float temperature = temp.temperature;
     gHumidity = humidity.relative_humidity;
     tN2kMsg N2kMsg;
     int instance = 2;
-    debugLog("Temperature:  %6.02f °C", gTemperature);
-    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(gTemperature));  // PGN 130316
+    debugLog("Temperature:   %6.02f °C", temperature);
+    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(temperature));  // PGN 130316
     NMEA2000.SendMsg(N2kMsg);
   }
 }
@@ -284,7 +283,7 @@ void SendN2kgHumidity() {
     HumidityScheduler.UpdateNextTime();
     tN2kMsg N2kMsg;
     int instance = 2;
-    debugLog("Humidity:     %6.02f %% RH", gHumidity);
+    debugLog("Humidity:      %6.02f %% RH", gHumidity);
     SetN2kHumidity(N2kMsg, 0xff, instance, N2khs_InsideHumidity, gHumidity);  // PGN 130313
     NMEA2000.SendMsg(N2kMsg);
   }
@@ -294,28 +293,27 @@ void SendN2kVaporAlarm() {
   if (VaporAlarmScheduler.IsTime()) {
     VaporAlarmScheduler.UpdateNextTime();
     // MQ-2 Vapor Sensor
-    uptimeSec = esp_timer_get_time() / 1000 / 1000;
+    tN2kOnOff vaporStatus = N2kOnOff_Unavailable;
+    unsigned long uptimeSec = esp_timer_get_time() / 1000 / 1000;
     if (uptimeSec < 300) {
       debugLog("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
     } else {
       double vaporReading = analogRead(VAPOR_PIN);
+      float vaportPercent = NAN;
       if (vaporReading >= 0 || vaporReading < 4096) {
         gVaporPercent = vaporReading * 100 / 4096;
+        if (gVaporPercent > 10) {
+          debugLog("Vapor ALARM");
+          vaporStatus = N2kOnOff_On;
+        } else {
+          vaporStatus = N2kOnOff_Off;
+        }
       } else {
         debugLog("ERROR Invalid reading from Vapor: %.06f", vaporReading);
         gVaporPercent = NAN;
       }
     }
-    tN2kOnOff vaporStatus = N2kOnOff_Unavailable;
-    if (!isnan(gVaporPercent)) {
-      if (gVaporPercent > 10) {
-        debugLog("Vapor ALARM");
-        vaporStatus = N2kOnOff_On;
-      } else {
-        vaporStatus = N2kOnOff_Off;
-      }
-    }
-    debugLog("Vapor         %6.02f %%", gVaporPercent);
+    debugLog("Vapor status   %6d", vaporStatus);
     tN2kMsg N2kMsg;
     SetN2kBinaryStatus(N2kMsg, 15, vaporStatus);
     NMEA2000.SendMsg(N2kMsg);
@@ -325,11 +323,12 @@ void SendN2kVaporAlarm() {
 void SendN2kEngineDynamicParam() {
   if (EngineDynamicScheduler.IsTime()) {
     EngineDynamicScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
     double fluidSend = N2kDoubleNA;
     if (!isnan(gVaporPercent)) {
       fluidSend = gVaporPercent;
     }
+    debugLog("Vapor          %6.02f %%", gVaporPercent);
+    tN2kMsg N2kMsg;
     SetN2kFluidLevel(N2kMsg, 0, N2kft_FuelGasoline, fluidSend, N2kDoubleNA);
     NMEA2000.SendMsg(N2kMsg);
   }
@@ -341,7 +340,7 @@ void SendN2kAttitude() {
     // BNO055
     sensors_event_t orientationData;
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-    debugLog("Yaw: %6.02f°    Pitch: %6.02f°    Roll: %6.02f°", orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);
+    debugLog("Yaw: %7.02f°    Pitch: %7.02f°    Roll: %7.02f°", orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);
     tN2kMsg N2kMsg;
     SetN2kAttitude(N2kMsg, 0xff, orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);  // PGN 127257
     NMEA2000.SendMsg(N2kMsg);
@@ -358,15 +357,10 @@ void loop() {
   NMEA2000.ParseMessages();
 
   int SourceAddress = NMEA2000.GetN2kSource();
-  if (SourceAddress != NodeAddress) {  // Save potentially changed Source Address to NVS memory
-    debugLog("Address Change: Old Address=%d", NodeAddress);
+  if (SourceAddress != gNodeAddress) {  // Save potentially changed Source Address to NVS memory
+    debugLog("Address Change: Old Address=%d", gNodeAddress);
     debugLog("                New Address=%d", SourceAddress);
-    NodeAddress = SourceAddress;  // Set new Node Address (to save only once)
-    writeIntToStorage("LastNodeAddress", NodeAddress);
-  }
-
-  // Dummy to empty input buffer to avoid board to stuck with e.g. NMEA Reader
-  if (Serial.available()) {
-    Serial.read();
+    gNodeAddress = SourceAddress;  // Set new Node Address (to save only once)
+    writeIntToStorage("LastNodeAddress", gNodeAddress);
   }
 }
