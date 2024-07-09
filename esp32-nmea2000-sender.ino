@@ -30,26 +30,24 @@ Preferences preferences;  // Nonvolatile storage on ESP32 - To store LastDeviceA
 // Set the information for other bus devices, which messages we support
 const unsigned long TransmitMessages[] PROGMEM = {  // 126993 // Heartbeat
   // 126996
+  127257L,  // Attitude: Yaw,Pitch,Roll
   127501L,  // Universal Binary Status Report
   127505L,  // Fluid Level
   127508L,  // Battery Status
-  130310L,  // Environmental Parameters - deprecated
   130313L,  // Humidity
-  130315L,  // Pressure
   130316L,  // Temperature extended range
   // 60928
   0
 };
 
 // Create schedulers, disabled at the beginning
-//                                  enabled  period offset
-tN2kSyncScheduler BmeTemperatureScheduler(false, 1500, 510);
-tN2kSyncScheduler BmeHumidityScheduler(false, 1500, 520);
-tN2kSyncScheduler BmePressureScheduler(false, 1500, 530);
-tN2kSyncScheduler EnvironmentScheduler(false, 1500, 540);
-tN2kSyncScheduler DCStatusScheduler(false, 1500, 550);
-tN2kSyncScheduler VaporAlarmScheduler(false, 1500, 560);
-tN2kSyncScheduler EngineDynamicScheduler(false, 1500, 570);
+//                               enabled  period offset
+tN2kSyncScheduler AttitudeScheduler(false, 500, 50);
+tN2kSyncScheduler TemperatureScheduler(false, 5000, 500);
+tN2kSyncScheduler HumidityScheduler(false, 5000, 600);
+tN2kSyncScheduler DCStatusScheduler(false, 5000, 700);
+tN2kSyncScheduler VaporAlarmScheduler(false, 5000, 800);
+tN2kSyncScheduler EngineDynamicScheduler(false, 5000, 900);
 
 // SHT40
 Adafruit_SHT4x sht4 = Adafruit_SHT4x();
@@ -60,12 +58,10 @@ Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29);
 
 
 // Global Data
-float busVoltage = NAN;
-float bmeTemperature = NAN;
-float bmeHumidity = NAN;
-float bmePressure = NAN;
-float bmeGas = NAN;
-float vaporPercent = NAN;
+float gBusVoltage = NAN;
+float gTemperature = NAN;
+float gHumidity = NAN;
+float gVaporPercent = NAN;
 unsigned long uptimeSec = 0;
 
 // Task handle for OneWire read (Core 0 on ESP32)
@@ -73,12 +69,16 @@ TaskHandle_t readSensorsTask;
 
 void debugLog(char* str) {
 #if ENABLE_DEBUG_LOG == 1
+  unsigned long milli = millis();
+  Serial.printf("%8d  ", milli);
   Serial.println(str);
 #endif
 }
 
 void debugInt(char* str, int value) {
 #if ENABLE_DEBUG_LOG == 1
+  unsigned long milli = millis();
+  Serial.printf("%8d  ", milli);
   Serial.printf(str, value);
   Serial.println("");
 #endif
@@ -86,7 +86,18 @@ void debugInt(char* str, int value) {
 
 void debugDouble(char* str, double value) {
 #if ENABLE_DEBUG_LOG == 1
+  unsigned long milli = millis();
+  Serial.printf("%8d  ", milli);
   Serial.printf(str, value);
+  Serial.println("");
+#endif
+}
+
+void debug3Double(char* str, double valueX, double valueY, double valueZ) {
+#if ENABLE_DEBUG_LOG == 1
+  unsigned long milli = millis();
+  Serial.printf("%8d  ", milli);
+  Serial.printf(str, valueX, valueY, valueZ);
   Serial.println("");
 #endif
 }
@@ -94,13 +105,12 @@ void debugDouble(char* str, double value) {
 void OnN2kOpen() {
   debugLog("NMEA2000 is Open.");
   // Start schedulers now.
-  BmeTemperatureScheduler.UpdateNextTime();
-  BmeHumidityScheduler.UpdateNextTime();
-  BmePressureScheduler.UpdateNextTime();
-  EnvironmentScheduler.UpdateNextTime();
+  TemperatureScheduler.UpdateNextTime();
+  HumidityScheduler.UpdateNextTime();
   DCStatusScheduler.UpdateNextTime();
   VaporAlarmScheduler.UpdateNextTime();
   EngineDynamicScheduler.UpdateNextTime();
+  AttitudeScheduler.UpdateNextTime();
 }
 
 int readIntFromStorage(const char* key, int defaultValue) {
@@ -134,97 +144,72 @@ void i2cScan() {
   Wire.begin();
   byte error, address;
   int nDevices;
-  Serial.println("Scanning...");
+  debugLog("Scanning I2C bus...");
   nDevices = 0;
   for (address = 1; address < 127; address++) {
     Wire.beginTransmission(address);
     error = Wire.endTransmission();
     if (error == 0) {
-      Serial.print("I2C device found at address 0x");
-      if (address < 16) {
-        Serial.print("0");
-      }
-      Serial.println(address, HEX);
+      debugInt("I2C device found at address 0x%02x", address);
       nDevices++;
     } else if (error == 4) {
-      Serial.print("Unknow error at address 0x");
-      if (address < 16) {
-        Serial.print("0");
-      }
-      Serial.println(address, HEX);
+      debugInt("Unknown error at address 0x%02x", address);
     }
   }
   if (nDevices == 0) {
-    Serial.println("No I2C devices found\n");
-  } else {
-    Serial.println("done\n");
+    debugLog("No I2C devices found\n");
   }
 }
 
 void setupSHT40() {
-  Serial.println("Adafruit SHT4x test");
-  if (!sht4.begin()) {
-    Serial.println("Couldn't find SHT4x");
-    while (1) delay(1);
+  while (!sht4.begin()) {
+    debugLog("Couldn't find SHT40 - waiting 5 sec");
+    delay(5);
   }
-  Serial.println("Found SHT4x sensor");
-  Serial.print("Serial number 0x");
-  Serial.println(sht4.readSerial(), HEX);
-
-  // You can have 3 different precisions, higher precision takes longer
+  debugLog("Found SHT40 sensor");
   sht4.setPrecision(SHT4X_HIGH_PRECISION);
-  switch (sht4.getPrecision()) {
-    case SHT4X_HIGH_PRECISION:
-      Serial.println("High precision");
-      break;
-    case SHT4X_MED_PRECISION:
-      Serial.println("Med precision");
-      break;
-    case SHT4X_LOW_PRECISION:
-      Serial.println("Low precision");
-      break;
-  }
-  // You can have 6 different heater settings
-  // higher heat and longer times uses more power
-  // and reads will take longer too!
-  sht4.setHeater(SHT4X_LOW_HEATER_100MS);
-  switch (sht4.getHeater()) {
-    case SHT4X_NO_HEATER:
-      Serial.println("No heater");
-      break;
-    case SHT4X_HIGH_HEATER_1S:
-      Serial.println("High heat for 1 second");
-      break;
-    case SHT4X_HIGH_HEATER_100MS:
-      Serial.println("High heat for 0.1 second");
-      break;
-    case SHT4X_MED_HEATER_1S:
-      Serial.println("Medium heat for 1 second");
-      break;
-    case SHT4X_MED_HEATER_100MS:
-      Serial.println("Medium heat for 0.1 second");
-      break;
-    case SHT4X_LOW_HEATER_1S:
-      Serial.println("Low heat for 1 second");
-      break;
-    case SHT4X_LOW_HEATER_100MS:
-      Serial.println("Low heat for 0.1 second");
-      break;
-  }
+  sht4.setHeater(SHT4X_NO_HEATER);
 }
 
 void setupBNO055() {
-  /* Initialize the sensor */
-  if (!bno.begin()) {
-    /* There was a problem detecting the BNO055 ... check your connections */
-    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
-    while (1)
-      ;
+  while (!bno.begin()) {
+    Serial.print("Couldn't find BNO055  - waiting 5 sec");
+    delay(5);
   }
+  debugLog("Found BNO055 sensor");
+}
+
+void setupN2K() {
+  // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
+  NMEA2000.SetN2kCANMsgBufSize(8);
+  NMEA2000.SetN2kCANReceiveFrameBufSize(250);
+  NMEA2000.SetN2kCANSendFrameBufSize(250);
+
+  // Set product information
+  NMEA2000.SetProductInformation("1",                      // Manufacturer's Model serial code
+                                 100,                      // Manufacturer's product code
+                                 "ESP32 NMEA2000 Sender",  // Manufacturer's Model ID
+                                 "0.0.2 (2024-06-04)",     // Manufacturer's Software version code
+                                 "1.0.0 (2024-06-04)"      // Manufacturer's Model version
+  );
+  // Set device information
+  NMEA2000.SetDeviceInformation(getUniqueID(),  // Unique number. Use e.g. Serial number.
+                                132,            // Device function=Analog to NMEA 2000 Gateway. See codes on http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
+                                25,             // Device class=Inter/Intranetwork Device. See codes on  http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
+                                2046            // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
+  );
+#if NMEA_DEBUG_LOG == 1
+  NMEA2000.SetForwardStream(&Serial);
+#endif
+  NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);            // Show in clear text. Leave uncommented for default Actisense format.
+  NodeAddress = readIntFromStorage("LastNodeAddress", 15);  // Read stored last NodeAddress
+  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, NodeAddress);
+  NMEA2000.ExtendTransmitMessages(TransmitMessages);
+  NMEA2000.SetOnOpen(OnN2kOpen);
+  NMEA2000.Open();
 }
 
 void setup() {
-  // Init USB serial port
   Serial.begin(115200);
   debugLog("");
   debugLog("Starting setup...");
@@ -236,64 +221,9 @@ void setup() {
   Wire.begin();
   i2cScan();
 
-  // while (!BME680.begin(I2C_STANDARD_MODE)) {  // Start BME680 using I2C, use first device found
-  //   debugLog("-  Unable to find BME680. Trying again in 5 seconds.");
-  //   delay(5000);
-  // }  // of loop until device is located
-  // BME680.setOversampling(TemperatureSensor, Oversample16);  // Use enumerated type values
-  // BME680.setOversampling(HumiditySensor, Oversample16);     // Use enumerated type values
-  // BME680.setOversampling(PressureSensor, Oversample16);     // Use enumerated type values
-  // Serial.print(F("- Setting IIR filter to a value of 4 samples\n"));
-  // BME680.setIIRFilter(IIR4);  // Use enumerated type values
-  // Serial.print(F("- Setting gas measurement to 320\xC2\xB0\x43 for 150ms\n"));  // "�C" symbols
-  // BME680.setGas(320, 150);  // 320�c for 150 milliseconds
-
   setupSHT40();
   setupBNO055();
-
-  // // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
-  NMEA2000.SetN2kCANMsgBufSize(8);
-  NMEA2000.SetN2kCANReceiveFrameBufSize(250);
-  NMEA2000.SetN2kCANSendFrameBufSize(250);
-
-  // Set product information
-  NMEA2000.SetProductInformation("1",                      // Manufacturer's Model serial code
-                                 100,                      // Manufacturer's product code
-                                 "ESP32 NMEA2000 Sender",  // Manufacturer's Model ID
-                                 "0.0.2 (2024-07-04)",     // Manufacturer's Software version code
-                                 "1.0.0 (2024-07-04)"      // Manufacturer's Model version
-  );
-  // Set device information
-  NMEA2000.SetDeviceInformation(getUniqueID(),  // Unique number. Use e.g. Serial number.
-                                132,            // Device function=Analog to NMEA 2000 Gateway. See codes on http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
-                                25,             // Device class=Inter/Intranetwork Device. See codes on  http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
-                                2046            // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
-  );
-
-#if NMEA_DEBUG_LOG == 1
-  NMEA2000.SetForwardStream(&Serial);
-#endif
-
-  NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);  // Show in clear text. Leave uncommented for default Actisense format.
-
-  NodeAddress = readIntFromStorage("LastNodeAddress", 15);  // Read stored last NodeAddress
-
-  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, NodeAddress);
-
-  NMEA2000.ExtendTransmitMessages(TransmitMessages);
-
-  NMEA2000.SetOnOpen(OnN2kOpen);
-  NMEA2000.Open();
-
-  // Create task for core 0, loop() runs on core 1
-  xTaskCreatePinnedToCore(
-    ReadSensors,       /* Function to implement the task */
-    "readSensorsTask", /* Name of the task */
-    10000,             /* Stack size in words */
-    NULL,              /* Task input parameter */
-    0,                 /* Priority of the task */
-    &readSensorsTask,  /* Task handle. */
-    0);                /* Core where the task should run */
+  setupN2K();
 
   debugLog("Setup complete.");
   delay(200);
@@ -310,120 +240,52 @@ double ReadVoltage() {
   return reading * ADC_Calibration_Value2 / 4096;
 }
 
-void ReadSensors(void* parameter) {
-  for (;;) {
-    vTaskDelay(100);
-
-    sensors_event_t humidity, temp;
-
-    uint32_t timestamp = millis();
-    sht4.getEvent(&humidity, &temp);  // populate temp and humidity objects with fresh data
-    timestamp = millis() - timestamp;
-    Serial.print("Temperature: ");
-    Serial.print(temp.temperature);
-    Serial.println(" degrees C");
-    Serial.print("Humidity: ");
-    Serial.print(humidity.relative_humidity);
-    Serial.println("% rH");
-
-    Serial.print("Read duration (ms): ");
-    Serial.println(timestamp);
-
-
-    sensors_event_t event;
-    bno.getEvent(&event);
-    /* Display the floating point data */
-    Serial.print("Yaw: ");
-    Serial.print(event.orientation.x, 4);
-    Serial.print("\tPitch: ");
-    Serial.print(event.orientation.y, 4);
-    Serial.print("\tRoll: ");
-    Serial.print(event.orientation.z, 4);
-    Serial.println("");
-
-
-    // Voltage
+void SendN2kBattery() {
+  if (DCStatusScheduler.IsTime()) {
+    DCStatusScheduler.UpdateNextTime();
     double voltageReading = ReadVoltage();
     if (isnan(voltageReading) || 0 >= voltageReading || 100 < voltageReading) {
       debugDouble("ERROR Invalid voltage reading: %.02f", voltageReading);
-      busVoltage = NAN;
+      gBusVoltage = NAN;
     } else {
-      if (isnan(busVoltage)) {
-        busVoltage = voltageReading;
+      if (isnan(gBusVoltage)) {
+        gBusVoltage = voltageReading;
       } else {
         // Filter to eliminate spike for ADC readings
-        busVoltage = ((busVoltage * 15) + voltageReading) / 16;
+        gBusVoltage = ((gBusVoltage * 15) + voltageReading) / 16;
       }
     }
-
-    // Vapor Sensor
-    uptimeSec = esp_timer_get_time() / 1000 / 1000;
-    if (uptimeSec < 300) {
-      debugDouble("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
-    } else {
-      double vaporReading = analogRead(VAPOR_PIN);
-      if (vaporReading >= 0 || vaporReading < 4096) {
-        vaporPercent = vaporReading * 100 / 4096;
-      } else {
-        debugDouble("ERROR Invalid reading from Vapor: %.06f", vaporReading);
-        vaporPercent = NAN;
-      }
-    }
-  }
-}
-
-void SendN2kBattery() {
-  if (DCStatusScheduler.IsTime()) {
+    double voltageSend = (isnan(gBusVoltage)) ? N2kDoubleNA : gBusVoltage;
+    debugDouble("Volt:         %6.02f V", gBusVoltage);
     tN2kMsg N2kMsg;
-    DCStatusScheduler.UpdateNextTime();
-    double voltageSend = N2kDoubleNA;
-    if (!isnan(busVoltage)) {
-      voltageSend = busVoltage;
-    }
-    debugDouble("Volt:         %4.02f V", busVoltage);
     SetN2kDCBatStatus(N2kMsg, 1, voltageSend, N2kDoubleNA, N2kDoubleNA, 1);
     NMEA2000.SendMsg(N2kMsg);
   }
 }
 
-void SendN2kBmeHumidity() {
-  if (BmeHumidityScheduler.IsTime()) {
-    BmeHumidityScheduler.UpdateNextTime();
+void SendN2kgTemperature() {
+  if (TemperatureScheduler.IsTime()) {
+    TemperatureScheduler.UpdateNextTime();
+    // SHT40
+    sensors_event_t humidity, temp;
+    sht4.getEvent(&humidity, &temp);
+    gTemperature = temp.temperature;
+    gHumidity = humidity.relative_humidity;
     tN2kMsg N2kMsg;
     int instance = 2;
-    debugDouble("BME Humidity: %4.02f %% RH", bmeHumidity);
-    SetN2kHumidity(N2kMsg, 0xff, instance, N2khs_InsideHumidity, bmeHumidity);  // PGN 130313
+    debugDouble("Temperature:  %6.02f °C", gTemperature);
+    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(gTemperature));  // PGN 130316
     NMEA2000.SendMsg(N2kMsg);
   }
 }
 
-void SendN2kBmeTemperature() {
-  if (BmeTemperatureScheduler.IsTime()) {
-    BmeTemperatureScheduler.UpdateNextTime();
+void SendN2kgHumidity() {
+  if (HumidityScheduler.IsTime()) {
+    HumidityScheduler.UpdateNextTime();
     tN2kMsg N2kMsg;
     int instance = 2;
-    debugDouble("BME Temp:     %4.02f °C", bmeTemperature);
-    SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(bmeTemperature));  // PGN 130316
-    NMEA2000.SendMsg(N2kMsg);
-  }
-}
-
-void SendN2kBmePressure() {
-  if (BmePressureScheduler.IsTime()) {
-    BmePressureScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
-    int instance = 2;
-    debugDouble("BME Pressure: %4.02f hPa", bmePressure);
-    SetN2kSetPressure(N2kMsg, 0xff, instance, N2kps_Atmospheric, hPAToPascal(bmePressure));  // PGN 130315
-    NMEA2000.SendMsg(N2kMsg);
-  }
-}
-
-void SendN2kEnvironment() {
-  if (EnvironmentScheduler.IsTime()) {
-    EnvironmentScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
-    SetN2kOutsideEnvironmentalParameters(N2kMsg, 0xff, N2kDoubleNA, N2kDoubleNA, hPAToPascal(bmePressure));  // PGN 130310
+    debugDouble("Humidity:     %6.02f %% RH", gHumidity);
+    SetN2kHumidity(N2kMsg, 0xff, instance, N2khs_InsideHumidity, gHumidity);  // PGN 130313
     NMEA2000.SendMsg(N2kMsg);
   }
 }
@@ -431,17 +293,30 @@ void SendN2kEnvironment() {
 void SendN2kVaporAlarm() {
   if (VaporAlarmScheduler.IsTime()) {
     VaporAlarmScheduler.UpdateNextTime();
-    tN2kMsg N2kMsg;
+    // MQ-2 Vapor Sensor
+    uptimeSec = esp_timer_get_time() / 1000 / 1000;
+    if (uptimeSec < 300) {
+      debugDouble("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
+    } else {
+      double vaporReading = analogRead(VAPOR_PIN);
+      if (vaporReading >= 0 || vaporReading < 4096) {
+        gVaporPercent = vaporReading * 100 / 4096;
+      } else {
+        debugDouble("ERROR Invalid reading from Vapor: %.06f", vaporReading);
+        gVaporPercent = NAN;
+      }
+    }
     tN2kOnOff vaporStatus = N2kOnOff_Unavailable;
-    if (!isnan(vaporPercent)) {
-      if (vaporPercent > 10) {
+    if (!isnan(gVaporPercent)) {
+      if (gVaporPercent > 10) {
         debugLog("Vapor ALARM");
         vaporStatus = N2kOnOff_On;
       } else {
         vaporStatus = N2kOnOff_Off;
       }
     }
-    debugDouble("Vapor         %4.02f %%", vaporPercent);
+    debugDouble("Vapor         %6.02f %%", gVaporPercent);
+    tN2kMsg N2kMsg;
     SetN2kBinaryStatus(N2kMsg, 15, vaporStatus);
     NMEA2000.SendMsg(N2kMsg);
   }
@@ -452,22 +327,34 @@ void SendN2kEngineDynamicParam() {
     EngineDynamicScheduler.UpdateNextTime();
     tN2kMsg N2kMsg;
     double fluidSend = N2kDoubleNA;
-    if (!isnan(vaporPercent)) {
-      fluidSend = vaporPercent;
+    if (!isnan(gVaporPercent)) {
+      fluidSend = gVaporPercent;
     }
     SetN2kFluidLevel(N2kMsg, 0, N2kft_FuelGasoline, fluidSend, N2kDoubleNA);
     NMEA2000.SendMsg(N2kMsg);
   }
 }
 
+void SendN2kAttitude() {
+  if (AttitudeScheduler.IsTime()) {
+    AttitudeScheduler.UpdateNextTime();
+    // BNO055
+    sensors_event_t orientationData;
+    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+    debug3Double("Yaw: %6.02f°    Pitch: %6.02f°    Roll: %6.02f°", orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);
+    tN2kMsg N2kMsg;
+    SetN2kAttitude(N2kMsg, 0xff, orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);  // PGN 127257
+    NMEA2000.SendMsg(N2kMsg);
+  }
+}
+
 void loop() {
-  SendN2kBmeTemperature();
-  SendN2kBmeHumidity();
-  SendN2kBmePressure();
-  SendN2kEnvironment();
+  SendN2kgTemperature();
+  SendN2kgHumidity();
   SendN2kBattery();
   SendN2kVaporAlarm();
   SendN2kEngineDynamicParam();
+  SendN2kAttitude();
   NMEA2000.ParseMessages();
 
   int SourceAddress = NMEA2000.GetN2kSource();
