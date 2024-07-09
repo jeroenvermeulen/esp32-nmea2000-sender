@@ -64,10 +64,8 @@ float gHumidity = NAN;
 float gVaporPercent = NAN;
 unsigned long uptimeSec = 0;
 
-// Task handle for OneWire read (Core 0 on ESP32)
-TaskHandle_t readSensorsTask;
-
-void debugLog(char* str) {
+// No value passed, just a message
+void debugLog(const char* str) {
 #if ENABLE_DEBUG_LOG == 1
   unsigned long milli = millis();
   Serial.printf("%8d  ", milli);
@@ -75,7 +73,9 @@ void debugLog(char* str) {
 #endif
 }
 
-void debugInt(char* str, int value) {
+// Overload for 1 value passed
+template<typename T>
+void debugLog(char* str, T value) {
 #if ENABLE_DEBUG_LOG == 1
   unsigned long milli = millis();
   Serial.printf("%8d  ", milli);
@@ -84,16 +84,20 @@ void debugInt(char* str, int value) {
 #endif
 }
 
-void debugDouble(char* str, double value) {
+// Overload for 2 values passed
+template<typename TA, typename TB>
+void debugLog(const char* str, TA valueA, TB valueB) {
 #if ENABLE_DEBUG_LOG == 1
   unsigned long milli = millis();
   Serial.printf("%8d  ", milli);
-  Serial.printf(str, value);
+  Serial.printf(str, valueA, valueB);
   Serial.println("");
 #endif
 }
 
-void debug3Double(char* str, double valueX, double valueY, double valueZ) {
+// Overload for 3 values passed
+template<typename TX, typename TY, typename TZ>
+void debugLog(const char* str, TX valueX, TY valueY, TZ valueZ) {
 #if ENABLE_DEBUG_LOG == 1
   unsigned long milli = millis();
   Serial.printf("%8d  ", milli);
@@ -117,9 +121,7 @@ int readIntFromStorage(const char* key, int defaultValue) {
   preferences.begin("nvs", false);
   int value = preferences.getInt(key, defaultValue);
   preferences.end();
-#if ENABLE_DEBUG_LOG == 1
-  Serial.printf("Received %s from storage: %d\n", key, value);
-#endif
+  debugLog("Received %s from storage: %d", key, value);
   return value;
 }
 
@@ -127,9 +129,7 @@ void writeIntToStorage(const char* key, int value) {
   preferences.begin("nvs", false);
   preferences.putInt(key, value);
   preferences.end();
-#if ENABLE_DEBUG_LOG == 1
-  Serial.printf("Written %s to storage: %d\n", key, value);
-#endif
+  debugLog("Written %s to storage: %d", key, value);
 }
 
 unsigned long getUniqueID() {
@@ -150,14 +150,14 @@ void i2cScan() {
     Wire.beginTransmission(address);
     error = Wire.endTransmission();
     if (error == 0) {
-      debugInt("I2C device found at address 0x%02x", address);
+      debugLog("I2C device found at address 0x%02x", address);
       nDevices++;
     } else if (error == 4) {
-      debugInt("Unknown error at address 0x%02x", address);
+      debugLog("Unknown error at address 0x%02x", address);
     }
   }
   if (nDevices == 0) {
-    debugLog("No I2C devices found\n");
+    debugLog("No I2C devices found");
   }
 }
 
@@ -245,7 +245,7 @@ void SendN2kBattery() {
     DCStatusScheduler.UpdateNextTime();
     double voltageReading = ReadVoltage();
     if (isnan(voltageReading) || 0 >= voltageReading || 100 < voltageReading) {
-      debugDouble("ERROR Invalid voltage reading: %.02f", voltageReading);
+      debugLog("ERROR Invalid voltage reading: %.02f", voltageReading);
       gBusVoltage = NAN;
     } else {
       if (isnan(gBusVoltage)) {
@@ -256,7 +256,7 @@ void SendN2kBattery() {
       }
     }
     double voltageSend = (isnan(gBusVoltage)) ? N2kDoubleNA : gBusVoltage;
-    debugDouble("Volt:         %6.02f V", gBusVoltage);
+    debugLog("Volt:         %6.02f V", gBusVoltage);
     tN2kMsg N2kMsg;
     SetN2kDCBatStatus(N2kMsg, 1, voltageSend, N2kDoubleNA, N2kDoubleNA, 1);
     NMEA2000.SendMsg(N2kMsg);
@@ -273,7 +273,7 @@ void SendN2kgTemperature() {
     gHumidity = humidity.relative_humidity;
     tN2kMsg N2kMsg;
     int instance = 2;
-    debugDouble("Temperature:  %6.02f °C", gTemperature);
+    debugLog("Temperature:  %6.02f °C", gTemperature);
     SetN2kTemperatureExt(N2kMsg, 0xff, instance, N2kts_InsideTemperature, CToKelvin(gTemperature));  // PGN 130316
     NMEA2000.SendMsg(N2kMsg);
   }
@@ -284,7 +284,7 @@ void SendN2kgHumidity() {
     HumidityScheduler.UpdateNextTime();
     tN2kMsg N2kMsg;
     int instance = 2;
-    debugDouble("Humidity:     %6.02f %% RH", gHumidity);
+    debugLog("Humidity:     %6.02f %% RH", gHumidity);
     SetN2kHumidity(N2kMsg, 0xff, instance, N2khs_InsideHumidity, gHumidity);  // PGN 130313
     NMEA2000.SendMsg(N2kMsg);
   }
@@ -296,13 +296,13 @@ void SendN2kVaporAlarm() {
     // MQ-2 Vapor Sensor
     uptimeSec = esp_timer_get_time() / 1000 / 1000;
     if (uptimeSec < 300) {
-      debugDouble("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
+      debugLog("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
     } else {
       double vaporReading = analogRead(VAPOR_PIN);
       if (vaporReading >= 0 || vaporReading < 4096) {
         gVaporPercent = vaporReading * 100 / 4096;
       } else {
-        debugDouble("ERROR Invalid reading from Vapor: %.06f", vaporReading);
+        debugLog("ERROR Invalid reading from Vapor: %.06f", vaporReading);
         gVaporPercent = NAN;
       }
     }
@@ -315,7 +315,7 @@ void SendN2kVaporAlarm() {
         vaporStatus = N2kOnOff_Off;
       }
     }
-    debugDouble("Vapor         %6.02f %%", gVaporPercent);
+    debugLog("Vapor         %6.02f %%", gVaporPercent);
     tN2kMsg N2kMsg;
     SetN2kBinaryStatus(N2kMsg, 15, vaporStatus);
     NMEA2000.SendMsg(N2kMsg);
@@ -341,7 +341,7 @@ void SendN2kAttitude() {
     // BNO055
     sensors_event_t orientationData;
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-    debug3Double("Yaw: %6.02f°    Pitch: %6.02f°    Roll: %6.02f°", orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);
+    debugLog("Yaw: %6.02f°    Pitch: %6.02f°    Roll: %6.02f°", orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);
     tN2kMsg N2kMsg;
     SetN2kAttitude(N2kMsg, 0xff, orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);  // PGN 127257
     NMEA2000.SendMsg(N2kMsg);
@@ -359,8 +359,8 @@ void loop() {
 
   int SourceAddress = NMEA2000.GetN2kSource();
   if (SourceAddress != NodeAddress) {  // Save potentially changed Source Address to NVS memory
-    debugInt("Address Change: Old Address=%d", NodeAddress);
-    debugInt("                New Address=%d", SourceAddress);
+    debugLog("Address Change: Old Address=%d", NodeAddress);
+    debugLog("                New Address=%d", SourceAddress);
     NodeAddress = SourceAddress;  // Set new Node Address (to save only once)
     writeIntToStorage("LastNodeAddress", NodeAddress);
   }
