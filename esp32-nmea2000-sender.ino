@@ -313,7 +313,7 @@ void SendN2kVaporAlarm() {
       float vaportPercent = NAN;
       if (vaporReading >= 0 || vaporReading < 4096) {
         gVaporPercent = vaporReading * 100 / 4096;
-        if (gVaporPercent > 0.5) {
+        if (gVaporPercent > 2) {
           debugLog("Vapor ALARM");
           vaporStatus = N2kOnOff_On;
         } else {
