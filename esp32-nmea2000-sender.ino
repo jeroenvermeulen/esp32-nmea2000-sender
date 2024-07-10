@@ -103,6 +103,17 @@ void debugLog(const char* str, TX valueX, TY valueY, TZ valueZ) {
 #endif
 }
 
+// Overload for 6 values passed
+template<typename TA, typename TB, typename TC, typename TX, typename TY, typename TZ>
+void debugLog(const char* str, TA valueA, TB valueB, TC valueC, TX valueX, TY valueY, TZ valueZ) {
+#if ENABLE_DEBUG_LOG == 1
+  unsigned long milli = millis();
+  Serial.printf("%8d  ", milli);
+  Serial.printf(str, valueA, valueB, valueC, valueX, valueY, valueZ);
+  Serial.println("");
+#endif
+}
+
 void OnN2kOpen() {
   debugLog("NMEA2000 is Open.");
   // Start schedulers now.
@@ -340,9 +351,18 @@ void SendN2kAttitude() {
     // BNO055
     sensors_event_t orientationData;
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-    debugLog("Yaw: %7.02f°    Pitch: %7.02f°    Roll: %7.02f°", orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);
+    double x = orientationData.orientation.x;
+    if (x > 180) {
+      x -= 360;
+    }
+    double y = orientationData.orientation.y;
+    double z = orientationData.orientation.z * -1;
+    double yaw = DegToRad(x);
+    double pitch = DegToRad(y);
+    double roll = DegToRad(z);
+    debugLog("Yaw: %7.02f° / %7.02fR   Pitch: %7.02f° / %7.02fR    Roll: %7.02f° / %7.02fR", x, yaw, y, pitch, z, roll );
     tN2kMsg N2kMsg;
-    SetN2kAttitude(N2kMsg, 0xff, orientationData.orientation.x, orientationData.orientation.y, orientationData.orientation.z);  // PGN 127257
+    SetN2kAttitude(N2kMsg, 0xff, yaw, pitch, roll);  // PGN 127257
     NMEA2000.SendMsg(N2kMsg);
   }
 }
