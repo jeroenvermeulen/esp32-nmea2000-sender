@@ -23,20 +23,18 @@
 #define ENABLE_DEBUG_LOG 1           // Debug log on serial
 #define NMEA_DEBUG_LOG 0             // NMEA message log on serial
 #define ADC_Calibration_Value2 19.85 // The real value depends on the true resistor values for the ADC input (100K / 27 K).
-#define VAPOR_MAX_PERCENT 8          // Percentage
+#define VAPOR_MAX_PERCENT 8.0        // Percentage of vapor detected by MQ-2 sensor to trigger alarm
 
 // Global Data
 
 // Set the information for other bus devices, which messages we support
 const unsigned long TransmitMessages[] PROGMEM = {  // 126993 // Heartbeat
-  // 126996
   127257L,  // Attitude: Yaw,Pitch,Roll
   127501L,  // Universal Binary Status Report
-  127505L,  // Fluid Level
+  127505L,  // Fluid Level, is used for Vapor percentage
   127508L,  // Battery Status
   130313L,  // Humidity
   130316L,  // Temperature extended range
-  // 60928
   0
 };
 
@@ -47,7 +45,7 @@ tN2kSyncScheduler TemperatureScheduler(false, 5000, 500);
 tN2kSyncScheduler HumidityScheduler(false, 5000, 600);
 tN2kSyncScheduler DCStatusScheduler(false, 5000, 700);
 tN2kSyncScheduler VaporAlarmScheduler(false, 5000, 800);
-tN2kSyncScheduler EngineDynamicScheduler(false, 5000, 900);
+tN2kSyncScheduler VaporLevelScheduler(false, 5000, 900);
 
 // SHT40
 Adafruit_SHT4x sht4 = Adafruit_SHT4x();
@@ -125,7 +123,7 @@ void OnN2kOpen() {
   HumidityScheduler.UpdateNextTime();
   DCStatusScheduler.UpdateNextTime();
   VaporAlarmScheduler.UpdateNextTime();
-  EngineDynamicScheduler.UpdateNextTime();
+  VaporLevelScheduler.UpdateNextTime();
   AttitudeScheduler.UpdateNextTime();
 }
 
@@ -236,7 +234,7 @@ void setup() {
   }
   debugLog("");
   debugLog("Starting setup...");
-  
+
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
 
@@ -331,7 +329,7 @@ void SendN2kVaporAlarm() {
       vaporPercent = NAN;
     }
     if (uptimeSec < 300 && gVaporWarmup) {
-      debugLog("Vapor: warming up MQ-2 sensor,%6.02f %%, uptime %.02f Sec", vaporPercent, uptimeSec);      
+      debugLog("Vapor: warming up MQ-2 sensor,%6.02f %%, uptime %.02f Sec", vaporPercent, uptimeSec);
       gVaporPercent = NAN;
       if (vaporPercent < 2) {
         gVaporWarmup = false;
@@ -354,9 +352,9 @@ void SendN2kVaporAlarm() {
   }
 }
 
-void SendN2kEngineDynamicParam() {
-  if (EngineDynamicScheduler.IsTime()) {
-    EngineDynamicScheduler.UpdateNextTime();
+void SendN2kVaporLevel() {
+  if (VaporLevelScheduler.IsTime()) {
+    VaporLevelScheduler.UpdateNextTime();
     double fluidSend = N2kDoubleNA;
     if (!isnan(gVaporPercent)) {
       fluidSend = gVaporPercent;
@@ -395,7 +393,7 @@ void loop() {
   SendN2kgHumidity();
   SendN2kBattery();
   SendN2kVaporAlarm();
-  SendN2kEngineDynamicParam(); // Vapor level
+  SendN2kVaporLevel(); // Vapor level
   SendN2kAttitude();
   NMEA2000.ParseMessages();
 
