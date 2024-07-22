@@ -6,6 +6,7 @@
 #define ESP32_CAN_RX_PIN GPIO_NUM_4  // Set CAN RX port to 4
 #define VOLTAGE_PIN GPIO_NUM_35      // Voltage measure is connected GPIO 35 (Analog ADC1_CH7)
 #define VAPOR_PIN GPIO_NUM_34        // Voltage measure is connected GPIO 34 (Analog ADC1_CH6)
+#define LED_PIN GPIO_NUM_14          // Yellow led
 
 #include <Arduino.h>
 #include <Preferences.h>      // ESP32
@@ -21,7 +22,8 @@
 
 #define ENABLE_DEBUG_LOG 1           // Debug log on serial
 #define NMEA_DEBUG_LOG 0             // NMEA message log on serial
-#define ADC_Calibration_Value2 19.0  // The real value depends on the true resistor values for the ADC input (100K / 27 K).
+#define ADC_Calibration_Value2 19.85 // The real value depends on the true resistor values for the ADC input (100K / 27 K).
+#define VAPOR_MAX_PERCENT 8          // Percentage
 
 // Global Data
 
@@ -40,7 +42,7 @@ const unsigned long TransmitMessages[] PROGMEM = {  // 126993 // Heartbeat
 
 // Create schedulers, disabled at the beginning
 //                               enabled  period offset
-tN2kSyncScheduler AttitudeScheduler(false, 500, 50);
+tN2kSyncScheduler AttitudeScheduler(false, 1000, 50);
 tN2kSyncScheduler TemperatureScheduler(false, 5000, 500);
 tN2kSyncScheduler HumidityScheduler(false, 5000, 600);
 tN2kSyncScheduler DCStatusScheduler(false, 5000, 700);
@@ -58,6 +60,8 @@ Preferences preferences;  // Nonvolatile storage on ESP32 - To store LastDeviceA
 int gNodeAddress;         // To store last Node Address
 float gHumidity = NAN;
 float gVaporPercent = NAN;
+bool gVaporWarmup = true;
+float gBusVoltage = NAN;
 
 // /Global Data
 
@@ -172,7 +176,7 @@ void i2cScan() {
 void setupSHT40() {
   while (!sht4.begin()) {
     debugLog("Couldn't find SHT40 - waiting 5 sec");
-    delay(5);
+    errorWait(5);
   }
   debugLog("Found SHT40 sensor");
   sht4.setPrecision(SHT4X_HIGH_PRECISION);
@@ -182,7 +186,7 @@ void setupSHT40() {
 void setupBNO055() {
   while (!bno.begin()) {
     debugLog("Couldn't find BNO055  - waiting 5 sec");
-    delay(5);
+    errorWait(5);
   }
   debugLog("Found BNO055 sensor");
 }
@@ -217,12 +221,24 @@ void setupN2K() {
   NMEA2000.Open();
 }
 
+void errorWait(int sec) {
+  for (int i = 0; i <= sec; i++) {
+    delay(500);
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+  }
+}
+
 void setup() {
   if (ENABLE_DEBUG_LOG || NMEA_DEBUG_LOG) {
     Serial.begin(115200);
   }
   debugLog("");
   debugLog("Starting setup...");
+  
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
 
   // Disable WiFi
   WiFi.disconnect();
@@ -237,6 +253,7 @@ void setup() {
 
   debugLog("Setup complete.");
   delay(200);
+  digitalWrite(LED_PIN, LOW);
 }
 
 // ReadVoltage is used to improve the linearity of the ESP32 ADC see: https://github.com/G6EJD/ESP32-ADC-Accuracy-Improvement-function
@@ -254,19 +271,18 @@ void SendN2kBattery() {
   if (DCStatusScheduler.IsTime()) {
     DCStatusScheduler.UpdateNextTime();
     double voltageReading = ReadVoltage();
-    float busVoltage = NAN;
     if (isnan(voltageReading) || 0 >= voltageReading || 100 < voltageReading) {
       debugLog("ERROR Invalid voltage reading: %.02f", voltageReading);
     } else {
-      if (isnan(busVoltage)) {
-        busVoltage = voltageReading;
+      if (isnan(gBusVoltage)) {
+        gBusVoltage = voltageReading;
       } else {
         // Filter to eliminate spike for ADC readings
-        busVoltage = ((busVoltage * 15) + voltageReading) / 16;
+        gBusVoltage = ((gBusVoltage * 15) + voltageReading) / 16;
       }
     }
-    double voltageSend = (isnan(busVoltage)) ? N2kDoubleNA : busVoltage;
-    debugLog("Volt:          %6.02f V", busVoltage);
+    double voltageSend = (isnan(gBusVoltage)) ? N2kDoubleNA : gBusVoltage;
+    debugLog("Volt:          %6.02f V", gBusVoltage);
     tN2kMsg N2kMsg;
     SetN2kDCBatStatus(N2kMsg, 1, voltageSend, N2kDoubleNA, N2kDoubleNA, 1);
     NMEA2000.SendMsg(N2kMsg);
@@ -306,22 +322,29 @@ void SendN2kVaporAlarm() {
     // MQ-2 Vapor Sensor
     tN2kOnOff vaporStatus = N2kOnOff_Unavailable;
     unsigned long uptimeSec = esp_timer_get_time() / 1000 / 1000;
-    if (uptimeSec < 300) {
-      debugLog("Vapor: warming up MQ-2 sensor, uptime %.02f Sec", uptimeSec);
+    float vaporPercent = NAN;
+    double vaporReading = analogRead(VAPOR_PIN);
+    if (vaporReading >= 0 || vaporReading < 4096) {
+      vaporPercent = vaporReading * 100 / 4096;
     } else {
-      double vaporReading = analogRead(VAPOR_PIN);
-      float vaportPercent = NAN;
-      if (vaporReading >= 0 || vaporReading < 4096) {
-        gVaporPercent = vaporReading * 100 / 4096;
-        if (gVaporPercent > 2.5) {
+      debugLog("ERROR Invalid reading from Vapor: %7.02f", vaporReading);
+      vaporPercent = NAN;
+    }
+    if (uptimeSec < 300 && gVaporWarmup) {
+      debugLog("Vapor: warming up MQ-2 sensor,%6.02f %%, uptime %.02f Sec", vaporPercent, uptimeSec);      
+      gVaporPercent = NAN;
+      if (vaporPercent < 2) {
+        gVaporWarmup = false;
+      }
+    } else {
+      gVaporPercent = vaporPercent;
+      if (!isnan(gVaporPercent)) {
+        if (gVaporPercent > VAPOR_MAX_PERCENT) {
           debugLog("Vapor ALARM");
           vaporStatus = N2kOnOff_On;
         } else {
           vaporStatus = N2kOnOff_Off;
         }
-      } else {
-        debugLog("ERROR Invalid reading from Vapor: %.06f", vaporReading);
-        gVaporPercent = NAN;
       }
     }
     debugLog("Vapor status   %6d", vaporStatus);
@@ -372,7 +395,7 @@ void loop() {
   SendN2kgHumidity();
   SendN2kBattery();
   SendN2kVaporAlarm();
-  SendN2kEngineDynamicParam();
+  SendN2kEngineDynamicParam(); // Vapor level
   SendN2kAttitude();
   NMEA2000.ParseMessages();
 
