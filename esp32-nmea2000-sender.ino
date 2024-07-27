@@ -2,11 +2,11 @@
  Inspired by https://github.com/AK-Homberger/NMEA2000-Data-Sender
 */
 
-#define ESP32_CAN_TX_PIN GPIO_NUM_5  // Set CAN TX port to 5
-#define ESP32_CAN_RX_PIN GPIO_NUM_4  // Set CAN RX port to 4
-#define VOLTAGE_PIN GPIO_NUM_35      // Voltage measure is connected GPIO 35 (Analog ADC1_CH7)
-#define VAPOR_PIN GPIO_NUM_34        // Voltage measure is connected GPIO 34 (Analog ADC1_CH6)
-#define LED_PIN GPIO_NUM_14          // Yellow led
+#define ESP32_CAN_TX_PIN GPIO_NUM_16  // Set CAN TX port, ESP RX2
+#define ESP32_CAN_RX_PIN GPIO_NUM_17  // Set CAN RX port, ESP TX2
+#define VOLTAGE_PIN GPIO_NUM_13       // Voltage measure pin
+#define VAPOR_PIN GPIO_NUM_34         // Analog output from MQ-2
+#define LED_PIN GPIO_NUM_25           // Yellow led
 
 #include <Arduino.h>
 #include <Preferences.h>      // ESP32
@@ -23,7 +23,7 @@
 #define ENABLE_DEBUG_LOG 1           // Debug log on serial
 #define NMEA_DEBUG_LOG 0             // NMEA message log on serial
 #define ADC_Calibration_Value2 19.85 // The real value depends on the true resistor values for the ADC input (100K / 27 K).
-#define VAPOR_MAX_PERCENT 8.0        // Percentage of vapor detected by MQ-2 sensor to trigger alarm
+#define VAPOR_MAX_PERCENT 6.0        // Percentage of vapor detected by MQ-2 sensor to trigger alarm
 
 // Global Data
 
@@ -238,15 +238,15 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
 
-  // Disable WiFi
+   // Disable WiFi
   WiFi.disconnect();
   WiFi.mode(WIFI_OFF);
 
   Wire.begin();
-  //i2cScan();
+  i2cScan();
 
   setupSHT40();
-  setupBNO055();
+  //setupBNO055();
   setupN2K();
 
   debugLog("Setup complete.");
@@ -394,7 +394,7 @@ void loop() {
   SendN2kBattery();
   SendN2kVaporAlarm();
   SendN2kVaporLevel(); // Vapor level
-  SendN2kAttitude();
+  // SendN2kAttitude();
   NMEA2000.ParseMessages();
 
   int SourceAddress = NMEA2000.GetN2kSource();
