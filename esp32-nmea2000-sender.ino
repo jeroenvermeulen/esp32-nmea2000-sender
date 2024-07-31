@@ -7,23 +7,28 @@
 #define VOLTAGE_PIN GPIO_NUM_13       // Voltage measure pin
 #define VAPOR_PIN GPIO_NUM_34         // Analog output from MQ-2
 #define LED_PIN GPIO_NUM_25           // Yellow led
+#define BNO08X_INT_PIN  GPIO_NUM_19   // BNO08X Will go low when its okay to talk on the SHTP bus
+#define BNO08X_RST_PIN  GPIO_NUM_18   // BNO08X Hardware reset control
 
-#include <Arduino.h>
-#include <Preferences.h>      // ESP32
-#include <WiFi.h>             // ESP32
-#include <Wire.h>             // ESP32
-#include <esp_mac.h>          // ESP32
-#include <NMEA2000_CAN.h>     // https://github.com/ttlappalainen/NMEA2000
-#include <N2kMessages.h>      // https://github.com/ttlappalainen/NMEA2000
-#include <Adafruit_SHT4x.h>   // Library Man: Adafruit SHT4x by Adafruit
-#include <Adafruit_BNO055.h>  // Library Man: Adafruit BNO055 by Adafruit
-#include <mcp_can.h>          // https://github.com/ttlappalainen/CAN_BUS_Shield
-#include <NMEA2000_mcp.h>     // https://github.com/ttlappalainen/NMEA2000_mcp
+#include <Arduino.h>                         // ESP32 
+#include <Preferences.h>                     // ESP32
+#include <WiFi.h>                            // ESP32
+#include <Wire.h>                            // ESP32
+#include <esp_mac.h>                         // ESP32
+#include <NMEA2000_CAN.h>                    // https://github.com/ttlappalainen/NMEA2000
+#include <N2kMessages.h>                     // https://github.com/ttlappalainen/NMEA2000
+#include <Adafruit_SHT4x.h>                  // http://librarymanager/All#Adafruit_SHT4x by Adafruit
+// #include <Adafruit_BNO055.h>              // http://librarymanager/All#Adafruit_BNO055 by Adafruit
+// #include <TinyMPU6050.h>                  // http://librarymanager/All#TinyMPU6050 by Gabriel Milan
+#include "SparkFun_BNO08x_Arduino_Library.h" // http://librarymanager/All#SparkFun_BNO08x by SparkFun Electronics
+#include <mcp_can.h>                         // https://github.com/ttlappalainen/CAN_BUS_Shield
+#include <NMEA2000_mcp.h>                    // https://github.com/ttlappalainen/NMEA2000_mcp
 
 #define ENABLE_DEBUG_LOG 1           // Debug log on serial
 #define NMEA_DEBUG_LOG 0             // NMEA message log on serial
 #define ADC_Calibration_Value2 19.85 // The real value depends on the true resistor values for the ADC input (100K / 27 K).
 #define VAPOR_MAX_PERCENT 6.0        // Percentage of vapor detected by MQ-2 sensor to trigger alarm
+#define ATTITUDE_UPDATE_MS 500       // Attitude update period
 
 // Global Data
 
@@ -40,7 +45,7 @@ const unsigned long TransmitMessages[] PROGMEM = {  // 126993 // Heartbeat
 
 // Create schedulers, disabled at the beginning
 //                               enabled  period offset
-tN2kSyncScheduler AttitudeScheduler(false, 1000, 50);
+tN2kSyncScheduler AttitudeScheduler(false, ATTITUDE_UPDATE_MS, 50);
 tN2kSyncScheduler TemperatureScheduler(false, 5000, 500);
 tN2kSyncScheduler HumidityScheduler(false, 5000, 600);
 tN2kSyncScheduler DCStatusScheduler(false, 5000, 700);
@@ -48,11 +53,18 @@ tN2kSyncScheduler VaporAlarmScheduler(false, 5000, 800);
 tN2kSyncScheduler VaporLevelScheduler(false, 5000, 900);
 
 // SHT40
-Adafruit_SHT4x sht4 = Adafruit_SHT4x();
+Adafruit_SHT4x sht4 = Adafruit_SHT4x(); // 0x44
 
 // BNO055
-#define BNO055_SAMPLERATE_DELAY_MS (100)
-Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29);
+// #define BNO055_SAMPLERATE_DELAY_MS (100)
+// Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x4b);
+
+// MPU6050
+// MPU6050 mpu (Wire);
+
+// BNO08X
+BNO08x myIMU;
+#define BNO08X_ADDR 0x4B
 
 Preferences preferences;  // Nonvolatile storage on ESP32 - To store LastDeviceAddress
 int gNodeAddress;         // To store last Node Address
@@ -171,6 +183,11 @@ void i2cScan() {
   }
 }
 
+void setupI2C() {
+  Wire.flush();   // Reset I2C
+  Wire.begin();
+}
+
 void setupSHT40() {
   while (!sht4.begin()) {
     debugLog("Couldn't find SHT40 - waiting 5 sec");
@@ -181,13 +198,46 @@ void setupSHT40() {
   sht4.setHeater(SHT4X_NO_HEATER);
 }
 
-void setupBNO055() {
-  while (!bno.begin()) {
-    debugLog("Couldn't find BNO055  - waiting 5 sec");
+// void setupBNO055() {
+//   debugLog("Setup BNO055...");
+//   while (!bno.begin()) {
+//     debugLog("Couldn't find BNO055  - waiting 5 sec");
+//     errorWait(5);
+//   }
+//   debugLog("Finished BNO055 setup.");
+// }
+
+void setupBNO08X() {
+  delay(100);     //  Wait for BNO to boot
+  debugLog("Setup BNO08X..");
+  while (myIMU.begin(BNO08X_ADDR, Wire, BNO08X_INT_PIN, BNO08X_RST_PIN) == false) {
+    debugLog("Couldn't find BNO08X  - waiting 5 sec");
     errorWait(5);
   }
-  debugLog("Found BNO055 sensor");
+  BNO08XsetReports();
+  debugLog("Finished BNO08X setup.");
 }
+
+void BNO08XwasReset() {
+  debugLog("BNO08X sensor was reset ");
+  BNO08XsetReports();
+}
+
+void BNO08XsetReports() {
+  if (myIMU.enableRotationVector(ATTITUDE_UPDATE_MS) == true) {
+    debugLog("BNO08X Rotation vector enabled");
+  } else {
+    debugLog("BNO08X ERROR Could not enable rotation vector");
+  }
+}
+
+// void setupMPU6050() {
+//   debugLog("Setup MPU6050 sensor...");
+//   mpu.Initialize();
+//   mpu.Calibrate();
+//   debugLog("MPU6050 Offsets:  X %7.02f   Y %7.02f   Z %7.02f", mpu.GetGyroXOffset(), mpu.GetGyroYOffset(), mpu.GetGyroZOffset());
+//   debugLog("Finished MPU6050 setup.");
+// }
 
 void setupN2K() {
   // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
@@ -242,11 +292,13 @@ void setup() {
   WiFi.disconnect();
   WiFi.mode(WIFI_OFF);
 
-  Wire.begin();
-  i2cScan();
+  setupI2C();
+  //i2cScan();
 
   setupSHT40();
-  //setupBNO055();
+  // setupBNO055();
+  // setupMPU6050();
+  setupBNO08X();
   setupN2K();
 
   debugLog("Setup complete.");
@@ -370,31 +422,50 @@ void SendN2kAttitude() {
   if (AttitudeScheduler.IsTime()) {
     AttitudeScheduler.UpdateNextTime();
     // BNO055
-    sensors_event_t orientationData;
-    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-    double x = orientationData.orientation.x;
-    if (x > 180) {
-      x -= 360;
+    // sensors_event_t orientationData;
+    // bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+    // double x = orientationData.orientation.x;
+    // if (x > 180) {
+    //   x -= 360;
+    // }
+    // double y = orientationData.orientation.y;
+    // double z = orientationData.orientation.z * -1;
+    // double yaw = DegToRad(x);
+    // double pitch = DegToRad(y);
+    // double roll = DegToRad(z);
+    // MPU6050
+    // double x = mpu.GetAngX();
+    // double y = mpu.GetAngY() * -1;
+    // double z = mpu.GetAngZ();
+    // double yaw = DegToRad(z);
+    // double pitch = DegToRad(y); // Positive, when your bow rises.
+    // double roll = DegToRad(x);  // Positive, when tilted right.
+    // BNO08X
+    if (myIMU.getSensorEvent() == true && myIMU.getSensorEventID() == SENSOR_REPORTID_ROTATION_VECTOR) {
+      float roll = myIMU.getRoll();
+      float pitch = myIMU.getPitch() * -1; 
+      float yaw = myIMU.getYaw();     
+      // //
+      debugLog("Yaw: %7.02fR   Pitch: %7.02fR    Roll:  %7.02fR", yaw, pitch, roll);
+      tN2kMsg N2kMsg;
+      SetN2kAttitude(N2kMsg, 0xff, yaw, pitch, roll);  // PGN 127257
+      NMEA2000.SendMsg(N2kMsg);
     }
-    double y = orientationData.orientation.y;
-    double z = orientationData.orientation.z * -1;
-    double yaw = DegToRad(x);
-    double pitch = DegToRad(y);
-    double roll = DegToRad(z);
-    debugLog("Yaw: %7.02f° / %7.02fR   Pitch: %7.02f° / %7.02fR    Roll: %7.02f° / %7.02fR", x, yaw, y, pitch, z, roll );
-    tN2kMsg N2kMsg;
-    SetN2kAttitude(N2kMsg, 0xff, yaw, pitch, roll);  // PGN 127257
-    NMEA2000.SendMsg(N2kMsg);
   }
 }
 
 void loop() {
+  if (myIMU.wasReset()) {
+    BNO08XwasReset();
+  }
+  // MPU6050
+  // mpu.Execute();
   SendN2kgTemperature();
-  SendN2kgHumidity();
+  SendN2kgHumidity();  
   SendN2kBattery();
   SendN2kVaporAlarm();
-  SendN2kVaporLevel(); // Vapor level
-  // SendN2kAttitude();
+  SendN2kVaporLevel();
+  SendN2kAttitude();
   NMEA2000.ParseMessages();
 
   int SourceAddress = NMEA2000.GetN2kSource();
